@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:mongo="http://www.mulesoft.org/schema/mule/mongo" xmlns:file="http://www.mulesoft.org/schema/mule/file" xmlns:json="http://www.mulesoft.org/schema/mule/json" xmlns:tracking="http://www.mulesoft.org/schema/mule/ee/tracking" xmlns:http="http://www.mulesoft.org/schema/mule/http" xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:spring="http://www.springframework.org/schema/beans" version="EE-3.5.1"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xmlns:context="http://www.springframework.org/schema/context"
+	xsi:schemaLocation="http://www.springframework.org/schema/context http://www.springframework.org/schema/context/spring-context-current.xsd
+http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans-current.xsd
+http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/ee/tracking http://www.mulesoft.org/schema/mule/ee/tracking/current/mule-tracking-ee.xsd
+http://www.mulesoft.org/schema/mule/file http://www.mulesoft.org/schema/mule/file/current/mule-file.xsd
+http://www.mulesoft.org/schema/mule/json http://www.mulesoft.org/schema/mule/json/current/mule-json.xsd
+http://www.mulesoft.org/schema/mule/mongo http://www.mulesoft.org/schema/mule/mongo/current/mule-mongo.xsd
+http://www.springframework.org/schema/context http://www.springframework.org/schema/context/spring-context-3.0.xsd">
+<context:property-placeholder location="mongodb.properties"/>
+<!--  if cache is not working, comment the asych processing to refresh the data asynchrosly - still work 
+ needs to be done to refresh the data my sql and cache it locally -->
+<spring:beans>  
+     <spring:bean id="MyCache" class="org.springframework.cache.ehcache.EhCacheFactoryBean">  
+       <spring:property name="cacheName" value="MyCache"/>  
+       <spring:property name="diskPersistent" value="false"/>  
+       <spring:property name="overflowToDisk" value="false"/>  
+       <spring:property name="maxElementsInMemory" value="100000"/>  
+       <spring:property name="eternal" value="false"/>  
+       <spring:property name="memoryStoreEvictionPolicy" value="LRU"/>  
+       <spring:property name="timeToIdle" value="60"/>  
+       <spring:property name="timeToLive" value="60"/>  
+     </spring:bean>  
+ </spring:beans> 
+ <!--    <expression-transformer expression="#[map-payload:command]" name="Expressionpayload" doc:name="Expression"/> -->
+    <mongo:config name="Mongo_DB" username="${mongodb.username}" password="${mongodb.password}" database="${mongodb.database}" host="${mongodb.host}" port="${mongodb.port}" doc:name="Mongo DB"/>
+    <asynchronous-processing-strategy name="Asynchronous_Processing_Strategy" maxThreads="5" minThreads="1" poolExhaustedAction="DISCARD_OLDEST" threadWaitTimeout="1000" doc:name="Asynchronous Processing Strategy"/>
+     <flow name="choicerouterexampleFlow1" doc:name="choicerouterexampleFlow1">
+        <http:inbound-endpoint exchange-pattern="one-way" host="localhost" port="8081" doc:name="HTTP"/>
+         <json:json-to-object-transformer returnClass="java.util.HashMap" doc:name="JSON to Object"/>
+        <async processingStrategy="Asynchronous_Processing_Strategy" doc:name="Async">
+             <custom-interceptor doc:name="PayloadCache"    class="com.fiverr.mule.integration.PayloadCache">  
+          		<spring:property name="cache" ref="MyCache"/>  
+ 			</custom-interceptor>
+ 			<choice doc:name="Choice">
+        		<when expression="isCacheEvicted == 'Y'" evaluator="ognl">
+            		<processor-chain doc:name="Processor Chain">
+                	<flow-ref name="fdcasterflows1Flow1" doc:name="Flow Reference"/>                    
+            	</processor-chain>
+        	</when>
+                <otherwise>
+                    <logger level="INFO" doc:name="Logger"/>
+                </otherwise>
+    	</choice>        
+            <echo-component doc:name="Echo"/>
+        </async> 
+        <echo-component doc:name="Echo "/>
+        <choice doc:name="Choice">
+           <when expression="(payload.command == 'createcollection')">
+                <logger message="good!" level="INFO" doc:name="Logger"/>
+                <mongo:create-collection config-ref="Mongo_DB" collection="jsonmsg-persist-collection" doc:name="Mongo DB-createcollection"/>
+            </when>
+            <when expression="(payload.command == 'createdocument')">
+            	<logger message="good!" level="INFO" doc:name="Logger"/>
+                <component class="com.fiverr.mule.integration.PayloadService" doc:name="Java"/>
+            	<json:object-to-json-transformer doc:name="Object to JSON"/>
+    			 <mongo:insert-object config-ref="Mongo_DB" collection="jsonmsg-persist-collection" doc:name="Mongo DB-createdocumentfromjson"/>
+  			</when>
+  			 <when expression="(payload.command == 'savedocument')">
+                <logger message="good! #[payload]" level="INFO" doc:name="Logger"/>
+                <component class="com.fiverr.mule.integration.PayloadService" doc:name="Java"/>
+                <mongo:insert-object-from-map config-ref="Mongo_DB" collection="jsonmsg-persist-collection" doc:name="Mongo DB-savedocumentfrommap">
+                <mongo:element-attributes ref="#[payload]"/>
+                </mongo:insert-object-from-map>
+              </when>
+              <when expression="(payload.command == 'filefrompayload')">
+                <logger message="good! #[payload]" level="INFO" doc:name="Logger"/>
+                 <component class="com.fiverr.mule.integration.PayloadService" doc:name="Java"/>
+                <string-to-byte-array-transformer doc:name="String to Byte Array"/>
+                <echo-component doc:name="Echo"/>
+                <mongo:create-file-from-payload config-ref="Mongo_DB" filename="dummy" doc:name="Mongo DBfile" contentType="application/json">
+                </mongo:create-file-from-payload>
+            </when>
+            <otherwise>
+            	 <logger message="bad!" level="INFO" doc:name="Logger"/>
+                <echo-component doc:name="Echo"/>
+            </otherwise>
+        </choice>
+    </flow>
+    <sub-flow name="fdcasterflows1Flow1" doc:name="fdcasterflows1Flow1">
+    	<component class="com.fiverr.mule.integration.RefreshConfigCache" doc:name="Java"/>
+</sub-flow>
+</mule>
